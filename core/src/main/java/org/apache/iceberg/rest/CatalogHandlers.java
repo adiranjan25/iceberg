@@ -883,7 +883,7 @@ public class CatalogHandlers {
             ? Collections.emptyList()
             : IN_MEMORY_PLANNING_STATE.nextPlanTask(initial.second());
     PlanTableScanResponse.Builder builder =
-        PlanTableScanResponse.builder(table.specs())
+        PlanTableScanResponse.builder(RESTPartitionSpecUtil.specs(table, initial.first()))
             .withPlanStatus(PlanStatus.COMPLETED)
             .withPlanId(planId)
             .withFileScanTasks(initial.first());
@@ -912,7 +912,7 @@ public class CatalogHandlers {
     }
 
     Pair<List<FileScanTask>, String> initial = IN_MEMORY_PLANNING_STATE.initialScanTasksFor(planId);
-    return FetchPlanningResultResponse.builder(table.specs())
+    return FetchPlanningResultResponse.builder(RESTPartitionSpecUtil.specs(table, initial.first()))
         .withPlanStatus(PlanStatus.COMPLETED)
         .withFileScanTasks(initial.first())
         .withPlanTasks(IN_MEMORY_PLANNING_STATE.nextPlanTask(initial.second()))
@@ -933,7 +933,7 @@ public class CatalogHandlers {
     String planTask = request.planTask();
     List<FileScanTask> fileScanTasks = IN_MEMORY_PLANNING_STATE.fileScanTasksForPlanTask(planTask);
 
-    return FetchScanTasksResponse.builder(table.specs())
+    return FetchScanTasksResponse.builder(RESTPartitionSpecUtil.specs(table, fileScanTasks))
         .withFileScanTasks(fileScanTasks)
         .withPlanTasks(IN_MEMORY_PLANNING_STATE.nextPlanTask(planTask))
         .build();

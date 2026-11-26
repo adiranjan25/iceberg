@@ -710,6 +710,97 @@ public class TestRESTScanPlanning extends TestBaseWithRESTServer {
 
   @ParameterizedTest
   @EnumSource(PlanningMode.class)
+  void remoteScanPlanningAfterPartitionSourcePromotionAndDrop(
+      Function<TestPlanningBehavior.Builder, TestPlanningBehavior.Builder> planMode)
+      throws IOException {
+    configurePlanningBehavior(builder -> planMode.apply(builder).tasksPerPage(1));
+
+    Schema schema =
+        new Schema(
+            Types.NestedField.required(1, "id", Types.LongType.get()),
+            Types.NestedField.required(2, "p", Types.IntegerType.get()));
+
+    PartitionSpec spec = PartitionSpec.builderFor(schema).identity("p").build();
+
+    restCatalog.createNamespace(NS);
+    Table table =
+        restCatalog
+            .buildTable(TableIdentifier.of(NS, "partition_promotion_time_travel"), schema)
+            .withPartitionSpec(spec)
+            .create();
+
+    DataFile originalFile =
+        DataFiles.builder(table.spec())
+            .withPath("/path/to/original.parquet")
+            .withFileSizeInBytes(100)
+            .withRecordCount(1)
+            .withPartitionPath("p=42")
+            .build();
+
+    table.newAppend().appendFile(originalFile).commit();
+    long originalSnapshotId = table.currentSnapshot().snapshotId();
+    Schema originalSchema = table.schema();
+
+    table.updateSchema().updateColumn("p", Types.LongType.get()).commit();
+
+    DataFile promotedFile =
+        DataFiles.builder(table.spec())
+            .withPath("/path/to/promoted.parquet")
+            .withFileSizeInBytes(100)
+            .withRecordCount(1)
+            .withPartitionPath("p=43")
+            .build();
+
+    table.newAppend().appendFile(promotedFile).commit();
+    long promotedSnapshotId = table.currentSnapshot().snapshotId();
+    Schema promotedSchema = table.schema();
+
+    table.manageSnapshots().createTag("promoted", promotedSnapshotId).commit();
+    table.updateSpec().removeField("p").commit();
+    table.updateSchema().deleteColumn("p").commit();
+
+    parserContext =
+        ParserContext.builder()
+            .add("specsById", RESTPartitionSpecUtil.specs(table, originalSchema))
+            .add("caseSensitive", false)
+            .build();
+
+    try (CloseableIterable<FileScanTask> tasks =
+        table.newScan().useSnapshot(originalSnapshotId).planFiles()) {
+      assertThat(Lists.newArrayList(tasks))
+          .hasSize(1)
+          .allSatisfy(
+              task -> {
+                assertThat(task.spec().partitionType().fields().get(0).type())
+                    .isEqualTo(Types.IntegerType.get());
+                assertThat(task.file().partition().get(0, Object.class)).isEqualTo(42);
+              });
+    }
+
+    parserContext =
+        ParserContext.builder()
+            .add("specsById", RESTPartitionSpecUtil.specs(table, promotedSchema))
+            .add("caseSensitive", false)
+            .build();
+
+    try (CloseableIterable<FileScanTask> tasks = table.newScan().useRef("promoted").planFiles()) {
+      List<FileScanTask> files = Lists.newArrayList(tasks);
+
+      assertThat(files)
+          .hasSize(2)
+          .allSatisfy(
+              task ->
+                  assertThat(task.spec().partitionType().fields().get(0).type())
+                      .isEqualTo(Types.LongType.get()));
+
+      assertThat(files)
+          .extracting(task -> task.file().partition().get(0, Object.class))
+          .containsExactlyInAnyOrder(42L, 43L);
+    }
+  }
+
+  @ParameterizedTest
+  @EnumSource(PlanningMode.class)
   void remoteScanPlanningWithTimeTravel(
       Function<TestPlanningBehavior.Builder, TestPlanningBehavior.Builder> planMode) {
     // Test server-side scan planning with time travel (snapshot-based queries)

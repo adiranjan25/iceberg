@@ -109,7 +109,7 @@ class RESTTableScan extends DataTableScan {
     this.supportedEndpoints = supportedEndpoints;
     this.parserContext =
         ParserContext.builder()
-            .add("specsById", table.specs())
+            .add("specsById", RESTPartitionSpecUtil.specs(table, schema))
             .add("caseSensitive", context().caseSensitive())
             .build();
     this.catalogProperties = catalogProperties;
