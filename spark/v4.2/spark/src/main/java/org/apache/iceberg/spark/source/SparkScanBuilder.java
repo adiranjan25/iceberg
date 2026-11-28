@@ -359,7 +359,9 @@ public class SparkScanBuilder extends BaseSparkScanBuilder
             .metricsReporter(metricsReporter());
 
     if (shouldPinSnapshot() || timeTravel != null) {
-      scan = scan.useSnapshot(snapshot.snapshotId());
+      scan =
+          scan.option("use-snapshot-schema", Boolean.toString(timeTravel != null))
+              .useSnapshot(snapshot.snapshotId());
     }
 
     Preconditions.checkState(

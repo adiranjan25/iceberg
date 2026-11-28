@@ -534,4 +534,102 @@ public class TestScansAndSchemaEvolution {
               assertThat(categoryFieldInTask.writeDefault()).isEqualTo(defaultValue);
             });
   }
+
+  @TestTemplate
+  public void testPinnedSnapshotUsesCurrentPromotedSchema() {
+    Schema schema =
+        new Schema(
+            required(1, "id", Types.LongType.get()), required(2, "p", Types.IntegerType.get()));
+    PartitionSpec spec = PartitionSpec.builderFor(schema).identity("p").build();
+    Table table = TestTables.create(temp, "test", schema, spec, formatVersion);
+
+    table
+        .newAppend()
+        .appendFile(
+            DataFiles.builder(table.spec())
+                .withPath("/path/to/data.parquet")
+                .withFileSizeInBytes(100)
+                .withRecordCount(1)
+                .withPartitionPath("p=42")
+                .build())
+        .commit();
+
+    long snapshotId = table.currentSnapshot().snapshotId();
+    table.updateSchema().updateColumn("p", Types.LongType.get()).commit();
+
+    assertThat(
+            table
+                .newScan()
+                .option("use-snapshot-schema", "false")
+                .useSnapshot(snapshotId)
+                .planFiles())
+        .hasSize(1)
+        .allSatisfy(
+            task -> {
+              assertThat(task.spec().partitionType().fields().get(0).type())
+                  .isEqualTo(Types.LongType.get());
+              assertThat(task.file().partition().get(0, Object.class)).isEqualTo(42L);
+            });
+  }
+
+  @TestTemplate
+  public void testHistoricalScanWithPartitionNameCollision() {
+    Schema schema =
+        new Schema(
+            required(1, "x", Types.IntegerType.get()), required(2, "y", Types.IntegerType.get()));
+    PartitionSpec spec = PartitionSpec.builderFor(schema).identity("x").build();
+    Table table = TestTables.create(temp, "test", schema, spec, formatVersion);
+
+    table
+        .newAppend()
+        .appendFile(
+            DataFiles.builder(table.spec())
+                .withPath("/path/to/original.parquet")
+                .withFileSizeInBytes(100)
+                .withRecordCount(1)
+                .withPartitionPath("x=42")
+                .build())
+        .commit();
+
+    long snapshotId = table.currentSnapshot().snapshotId();
+
+    table.updateSpec().removeField("x").commit();
+    table.updateSchema().deleteColumn("x").commit();
+    table.updateSpec().addField("x", Expressions.bucket("y", 8)).commit();
+
+    assertThat(
+            table.newScan().useSnapshot(snapshotId).filter(Expressions.equal("x", 42)).planFiles())
+        .hasSize(1)
+        .allSatisfy(task -> assertThat(task.file().partition().get(0, Object.class)).isEqualTo(42));
+  }
+
+  @TestTemplate
+  public void testHistoricalTagWithoutMainSnapshot() throws IOException {
+    Table table = TestTables.create(temp, "test", SCHEMA, SPEC, formatVersion);
+
+    table.manageSnapshots().createBranch("dev").commit();
+    table.newAppend().toBranch("dev").appendFile(createDataFile("one")).commit();
+
+    long snapshotId = table.refs().get("dev").snapshotId();
+    table.manageSnapshots().createTag("historical", snapshotId).commit();
+
+    assertThat(table.currentSnapshot()).isNull();
+
+    table.updateSpec().removeField("part").commit();
+    table.updateSchema().deleteColumn("part").commit();
+
+    assertThat(
+            table
+                .newScan()
+                .useRef("historical")
+                .filter(Expressions.equal("part", "one"))
+                .planFiles())
+        .hasSize(1)
+        .allSatisfy(
+            task -> {
+              assertThat(task.spec().partitionType().fields().get(0).type())
+                  .isEqualTo(Types.StringType.get());
+              assertThat(task.file().partition().get(0, Object.class).toString()).isEqualTo("one");
+            });
+  }
 }

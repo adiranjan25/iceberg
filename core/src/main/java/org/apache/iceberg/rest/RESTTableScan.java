@@ -81,12 +81,11 @@ class RESTTableScan extends DataTableScan {
   private final ResourcePaths resourcePaths;
   private final TableIdentifier tableIdentifier;
   private final Set<Endpoint> supportedEndpoints;
-  private final ParserContext parserContext;
+  private ParserContext parserContext;
   private final Map<String, String> catalogProperties;
   private final Object hadoopConf;
   private String planId = null;
   private FileIO scanFileIO = null;
-  private boolean useSnapshotSchema = false;
 
   RESTTableScan(
       Table table,
@@ -107,11 +106,6 @@ class RESTTableScan extends DataTableScan {
     this.tableIdentifier = tableIdentifier;
     this.resourcePaths = resourcePaths;
     this.supportedEndpoints = supportedEndpoints;
-    this.parserContext =
-        ParserContext.builder()
-            .add("specsById", RESTPartitionSpecUtil.specs(table, schema))
-            .add("caseSensitive", context().caseSensitive())
-            .build();
     this.catalogProperties = catalogProperties;
     this.hadoopConf = hadoopConf;
   }
@@ -119,34 +113,31 @@ class RESTTableScan extends DataTableScan {
   @Override
   protected TableScan newRefinedScan(
       Table refinedTable, Schema refinedSchema, TableScanContext refinedContext) {
-    RESTTableScan scan =
-        new RESTTableScan(
-            refinedTable,
-            refinedSchema,
-            refinedContext,
-            client,
-            headers,
-            operations,
-            tableIdentifier,
-            resourcePaths,
-            supportedEndpoints,
-            catalogProperties,
-            hadoopConf);
-    scan.useSnapshotSchema = useSnapshotSchema;
-    return scan;
+    return new RESTTableScan(
+        refinedTable,
+        refinedSchema,
+        refinedContext,
+        client,
+        headers,
+        operations,
+        tableIdentifier,
+        resourcePaths,
+        supportedEndpoints,
+        catalogProperties,
+        hadoopConf);
   }
 
   @Override
   public TableScan useRef(String name) {
     SnapshotRef ref = table().refs().get(name);
-    this.useSnapshotSchema = ref != null && ref.isTag();
-    return super.useRef(name);
+    boolean useHistoricalSchema = useSnapshotSchema() && ref != null && ref.isTag();
+    RESTTableScan scan =
+        (RESTTableScan) option("use-snapshot-schema", Boolean.toString(useHistoricalSchema));
+    return scan.useRefInternal(name);
   }
 
-  @Override
-  public TableScan useSnapshot(long snapshotId) {
-    this.useSnapshotSchema = true;
-    return super.useSnapshot(snapshotId);
+  private TableScan useRefInternal(String name) {
+    return super.useRef(name);
   }
 
   @Override
@@ -160,6 +151,12 @@ class RESTTableScan extends DataTableScan {
 
   @Override
   public CloseableIterable<FileScanTask> planFiles() {
+    this.parserContext =
+        ParserContext.builder()
+            .add("specsById", specs())
+            .add("caseSensitive", context().caseSensitive())
+            .build();
+
     Long startSnapshotId = context().fromSnapshotId();
     Long endSnapshotId = context().toSnapshotId();
     Long snapshotId = snapshotId();
@@ -189,7 +186,7 @@ class RESTTableScan extends DataTableScan {
           .withEndSnapshotId(endSnapshotId)
           .withUseSnapshotSchema(true);
     } else if (snapshotId != null) {
-      builder.withSnapshotId(snapshotId).withUseSnapshotSchema(useSnapshotSchema);
+      builder.withSnapshotId(snapshotId).withUseSnapshotSchema(useSnapshotSchema());
     }
 
     return planTableScan(builder.build());

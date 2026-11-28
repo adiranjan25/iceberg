@@ -762,7 +762,7 @@ public class TestRESTScanPlanning extends TestBaseWithRESTServer {
 
     parserContext =
         ParserContext.builder()
-            .add("specsById", RESTPartitionSpecUtil.specs(table, originalSchema))
+            .add("specsById", specsForSchema(table, originalSchema))
             .add("caseSensitive", false)
             .build();
 
@@ -780,7 +780,7 @@ public class TestRESTScanPlanning extends TestBaseWithRESTServer {
 
     parserContext =
         ParserContext.builder()
-            .add("specsById", RESTPartitionSpecUtil.specs(table, promotedSchema))
+            .add("specsById", specsForSchema(table, promotedSchema))
             .add("caseSensitive", false)
             .build();
 
@@ -865,7 +865,7 @@ public class TestRESTScanPlanning extends TestBaseWithRESTServer {
 
     parserContext =
         ParserContext.builder()
-            .add("specsById", RESTPartitionSpecUtil.specs(table, originalSchema))
+            .add("specsById", specsForSchema(table, originalSchema))
             .add("caseSensitive", false)
             .build();
 
@@ -888,7 +888,7 @@ public class TestRESTScanPlanning extends TestBaseWithRESTServer {
 
     parserContext =
         ParserContext.builder()
-            .add("specsById", RESTPartitionSpecUtil.specs(table, promotedSchema))
+            .add("specsById", specsForSchema(table, promotedSchema))
             .add("caseSensitive", false)
             .build();
 
@@ -1957,5 +1957,76 @@ public class TestRESTScanPlanning extends TestBaseWithRESTServer {
     } else {
       assertThat(table).isInstanceOf(RESTTable.class);
     }
+  }
+
+  @ParameterizedTest
+  @EnumSource(PlanningMode.class)
+  void remoteScanPlanningWithFractionalFloatPromotion(
+      Function<TestPlanningBehavior.Builder, TestPlanningBehavior.Builder> planMode)
+      throws IOException {
+    configurePlanningBehavior(builder -> planMode.apply(builder).tasksPerPage(1));
+
+    Schema schema =
+        new Schema(
+            Types.NestedField.required(1, "id", Types.LongType.get()),
+            Types.NestedField.required(2, "p", Types.FloatType.get()));
+
+    PartitionSpec spec = PartitionSpec.builderFor(schema).identity("p").build();
+
+    restCatalog.createNamespace(NS);
+    Table table =
+        restCatalog
+            .buildTable(TableIdentifier.of(NS, "fractional_float_promotion"), schema)
+            .withPartitionSpec(spec)
+            .create();
+
+    table
+        .newAppend()
+        .appendFile(
+            DataFiles.builder(table.spec())
+                .withPath("/path/to/first.parquet")
+                .withFileSizeInBytes(100)
+                .withRecordCount(1)
+                .withPartitionPath("p=1.1")
+                .build())
+        .appendFile(
+            DataFiles.builder(table.spec())
+                .withPath("/path/to/second.parquet")
+                .withFileSizeInBytes(100)
+                .withRecordCount(1)
+                .withPartitionPath("p=2.2")
+                .build())
+        .commit();
+
+    long snapshotId = table.currentSnapshot().snapshotId();
+    table.manageSnapshots().createBranch("dev", snapshotId).commit();
+    table.updateSchema().updateColumn("p", Types.DoubleType.get()).commit();
+
+    parserContext =
+        ParserContext.builder()
+            .add("specsById", specsForSchema(table, table.schema()))
+            .add("caseSensitive", false)
+            .build();
+
+    try (CloseableIterable<FileScanTask> tasks = table.newScan().useRef("dev").planFiles()) {
+      List<FileScanTask> files = Lists.newArrayList(tasks);
+
+      assertThat(files)
+          .hasSize(2)
+          .allSatisfy(
+              task ->
+                  assertThat(task.spec().partitionType().fields().get(0).type())
+                      .isEqualTo(Types.DoubleType.get()));
+
+      assertThat(files)
+          .extracting(task -> task.file().partition().get(0, Object.class))
+          .containsExactlyInAnyOrder((double) 1.1f, (double) 2.2f);
+    }
+  }
+
+  private static java.util.Map<Integer, PartitionSpec> specsForSchema(Table table, Schema schema) {
+    java.util.Map<Integer, PartitionSpec> specs = new java.util.HashMap<>(table.specs());
+    specs.replaceAll((id, spec) -> spec.toUnbound().bind(schema, true));
+    return specs;
   }
 }

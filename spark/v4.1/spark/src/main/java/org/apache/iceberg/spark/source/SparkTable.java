@@ -234,7 +234,7 @@ public class SparkTable extends BaseSparkTable
     if (scanBranch != null) {
       scan = scan.useRef(scanBranch);
     } else if (snapshot != null) {
-      scan = scan.useSnapshot(snapshot.snapshotId());
+      scan = scan.option("use-snapshot-schema", "false").useSnapshot(snapshot.snapshotId());
     }
 
     try (CloseableIterable<FileScanTask> tasks = scan.planFiles()) {

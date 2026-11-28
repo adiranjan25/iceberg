@@ -53,7 +53,7 @@ public class DataTableScan extends BaseTableScan {
 
   @Override
   protected boolean useSnapshotSchema() {
-    return true;
+    return Boolean.parseBoolean(options().getOrDefault("use-snapshot-schema", "true"));
   }
 
   @Override

@@ -30,7 +30,7 @@ abstract class DataScan<ThisT, T extends ScanTask, G extends ScanTaskGroup<T>>
 
   @Override
   protected boolean useSnapshotSchema() {
-    return true;
+    return Boolean.parseBoolean(options().getOrDefault("use-snapshot-schema", "true"));
   }
 
   protected ManifestGroup newManifestGroup(

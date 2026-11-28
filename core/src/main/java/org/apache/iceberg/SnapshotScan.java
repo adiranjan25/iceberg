@@ -85,7 +85,6 @@ public abstract class SnapshotScan<ThisT, T extends ScanTask, G extends ScanTask
     // requires latest schema
     if (!useSnapshotSchema()
         || snapshotId() == null
-        || table().currentSnapshot() == null
         || tableSchema().schemaId() == table().schema().schemaId()) {
       return specs;
     }
@@ -95,7 +94,7 @@ public abstract class SnapshotScan<ThisT, T extends ScanTask, G extends ScanTask
     ImmutableMap.Builder<Integer, PartitionSpec> newSpecs =
         ImmutableMap.builderWithExpectedSize(specs.size());
     for (Map.Entry<Integer, PartitionSpec> entry : specs.entrySet()) {
-      newSpecs.put(entry.getKey(), entry.getValue().toUnbound().bind(snapshotSchema, true));
+      newSpecs.put(entry.getKey(), entry.getValue().toUnbound().bindForScan(snapshotSchema));
     }
 
     return newSpecs.build();

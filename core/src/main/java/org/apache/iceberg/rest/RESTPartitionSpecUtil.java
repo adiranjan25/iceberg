@@ -21,18 +21,11 @@ package org.apache.iceberg.rest;
 import java.util.Map;
 import org.apache.iceberg.FileScanTask;
 import org.apache.iceberg.PartitionSpec;
-import org.apache.iceberg.Schema;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.relocated.com.google.common.collect.Maps;
 
 final class RESTPartitionSpecUtil {
   private RESTPartitionSpecUtil() {}
-
-  static Map<Integer, PartitionSpec> specs(Table table, Schema schema) {
-    Map<Integer, PartitionSpec> specs = Maps.newHashMap(table.specs());
-    specs.replaceAll((id, spec) -> spec.toUnbound().bind(schema, true));
-    return specs;
-  }
 
   static Map<Integer, PartitionSpec> specs(Table table, Iterable<FileScanTask> tasks) {
     Map<Integer, PartitionSpec> specs = Maps.newHashMap(table.specs());

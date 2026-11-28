@@ -666,6 +666,7 @@ public class SparkScanBuilder
 
     BatchScan scan =
         newBatchScan()
+            .option("use-snapshot-schema", "false")
             .useSnapshot(snapshotId)
             .caseSensitive(caseSensitive)
             .filter(filterExpression())
@@ -702,6 +703,7 @@ public class SparkScanBuilder
     BatchScan scan =
         table
             .newBatchScan()
+            .option("use-snapshot-schema", "false")
             .useSnapshot(snapshot.snapshotId())
             .ignoreResiduals()
             .caseSensitive(caseSensitive)
