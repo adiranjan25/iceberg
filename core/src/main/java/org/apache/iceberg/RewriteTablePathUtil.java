@@ -52,6 +52,7 @@ import org.apache.iceberg.relocated.com.google.common.collect.ImmutableList;
 import org.apache.iceberg.relocated.com.google.common.collect.Lists;
 import org.apache.iceberg.relocated.com.google.common.collect.Maps;
 import org.apache.iceberg.relocated.com.google.common.collect.Sets;
+import org.apache.iceberg.types.Comparators;
 import org.apache.iceberg.util.ContentFileUtil;
 import org.apache.iceberg.util.Pair;
 import org.slf4j.Logger;
@@ -699,13 +700,32 @@ public class RewriteTablePathUtil {
             posDeleteReaderWriter.writer(
                 outputFile, deleteFile.format(), spec, deleteFile.partition())) {
 
-          writer.write(newPositionDeleteRecord(record, sourcePrefix, targetPrefix));
+          PositionDelete<Record> previous =
+              newPositionDeleteRecord(record, sourcePrefix, targetPrefix);
+          writer.write(previous);
 
           while (recordIt.hasNext()) {
             record = recordIt.next();
             if (record != null) {
               checkNoRowData(record, path);
-              writer.write(newPositionDeleteRecord(record, sourcePrefix, targetPrefix));
+              PositionDelete<Record> current =
+                  newPositionDeleteRecord(record, sourcePrefix, targetPrefix);
+
+              int pathComparison =
+                  Comparators.charSequences().compare(previous.path(), current.path());
+
+              Preconditions.checkArgument(
+                  pathComparison < 0 || (pathComparison == 0 && previous.pos() <= current.pos()),
+                  "Rewriting position delete file %s would violate sort order: "
+                      + "(%s, %s) followed by (%s, %s)",
+                  path,
+                  previous.path(),
+                  previous.pos(),
+                  current.path(),
+                  current.pos());
+
+              writer.write(current);
+              previous = current;
             }
           }
 
@@ -881,8 +901,8 @@ public class RewriteTablePathUtil {
   }
 
   private static String normalizeLocalFileUri(String path) {
-    if (path.startsWith("file:///")) {
-      return "file:/" + path.substring("file:///".length());
+    if (path.startsWith("file:/") && !path.startsWith("file://")) {
+      return "file:///" + path.substring("file:/".length());
     }
 
     return path;

@@ -41,6 +41,7 @@ import org.apache.commons.io.FileUtils;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.iceberg.BaseTable;
 import org.apache.iceberg.DataFile;
+import org.apache.iceberg.DataFiles;
 import org.apache.iceberg.DeleteFile;
 import org.apache.iceberg.FileFormat;
 import org.apache.iceberg.HasTableOperations;
@@ -534,6 +535,167 @@ public class TestRewriteTablePathsAction extends TestBase {
     // Positional delete affects a single row, so only one row must remain
     assertThat(spark.read().format("iceberg").load(targetTableLocation()).collectAsList())
         .hasSize(1);
+  }
+
+  @TestTemplate
+  public void testEquivalentLocalFileUriWithDeletes() throws Exception {
+    String fileFormat = "parquet";
+    Table tableWithPosDeletes =
+        createTableWithSnapshots(
+            tableDir.toFile().toURI().toString().concat("tableWithPosDeletes").concat(fileFormat),
+            2,
+            Map.of(TableProperties.DELETE_DEFAULT_FILE_FORMAT, fileFormat));
+
+    List<DataFile> dataFiles = Lists.newArrayList();
+    try (org.apache.iceberg.io.CloseableIterable<org.apache.iceberg.FileScanTask> tasks =
+        tableWithPosDeletes.newScan().planFiles()) {
+      tasks.forEach(task -> dataFiles.add(task.file()));
+    }
+
+    assertThat(dataFiles).hasSize(2);
+
+    DataFile originalFile = dataFiles.get(0);
+    String originalPath = originalFile.location();
+
+    String alternatePath =
+        originalPath.startsWith("file:///")
+            ? "file:/" + originalPath.substring("file:///".length())
+            : "file:///" + originalPath.substring("file:/".length());
+
+    DataFile alternateFile =
+        DataFiles.builder(tableWithPosDeletes.spec())
+            .copy(originalFile)
+            .withPath(alternatePath)
+            .build();
+
+    tableWithPosDeletes
+        .newRewrite()
+        .rewriteFiles(java.util.Set.of(originalFile), java.util.Set.of(alternateFile))
+        .commit();
+
+    List<String> storedPaths = Lists.newArrayList();
+    try (org.apache.iceberg.io.CloseableIterable<org.apache.iceberg.FileScanTask> tasks =
+        tableWithPosDeletes.newScan().planFiles()) {
+      tasks.forEach(task -> storedPaths.add(task.file().location()));
+    }
+
+    assertThat(storedPaths).anyMatch(path -> path.startsWith("file:///"));
+    assertThat(storedPaths)
+        .anyMatch(path -> path.startsWith("file:/") && !path.startsWith("file://"));
+
+    List<Pair<CharSequence, Long>> deletes =
+        Lists.newArrayList(
+            Pair.of(
+                SnapshotChanges.builderFor(tableWithPosDeletes)
+                    .build()
+                    .addedDataFiles()
+                    .iterator()
+                    .next()
+                    .location(),
+                0L));
+
+    File file =
+        new File(
+            removePrefix(
+                tableWithPosDeletes.location() + "/data/deeply/nested/deletes." + fileFormat));
+    DeleteFile positionDeletes =
+        FileHelpers.writeDeleteFile(
+                tableWithPosDeletes,
+                tableWithPosDeletes.io().newOutputFile(file.toURI().toString()),
+                deletes,
+                formatVersion)
+            .first();
+
+    tableWithPosDeletes.newRowDelta().addDeletes(positionDeletes).commit();
+
+    assertThat(spark.read().format("iceberg").load(tableWithPosDeletes.location()).collectAsList())
+        .hasSize(1);
+
+    String sourcePrefix = tableWithPosDeletes.location();
+    String alternateSourcePrefix =
+        sourcePrefix.startsWith("file:///")
+            ? "file:/" + sourcePrefix.substring("file:///".length())
+            : "file:///" + sourcePrefix.substring("file:/".length());
+
+    assertThat(alternateSourcePrefix).isNotEqualTo(sourcePrefix);
+
+    List<Row> originalRows = spark.read().format("iceberg").load(sourcePrefix).collectAsList();
+
+    RewriteTablePath.Result result =
+        actions()
+            .rewriteTablePath(tableWithPosDeletes)
+            .stagingLocation(stagingLocation())
+            .rewriteLocationPrefix(alternateSourcePrefix, targetTableLocation())
+            .execute();
+
+    // We have one more snapshot, an additional manifest list, and a new (delete) manifest,
+    // and an additional position delete
+    assertThat(result.fileListLocation()).isNotBlank();
+
+    // copy the metadata files and data files
+    copyTableFiles(result);
+    assertManifestLengthsMatchOnDisk(TABLES.load(targetTableLocation()));
+
+    // Positional delete affects a single row, so only one row must remain
+    List<Row> relocatedRows =
+        spark.read().format("iceberg").load(targetTableLocation()).collectAsList();
+
+    assertThat(relocatedRows).hasSize(1).containsExactlyInAnyOrderElementsOf(originalRows);
+  }
+
+  @TestTemplate
+  public void testRewriteWithEquivalentLocalFileUriPrefix() throws Exception {
+    String sourcePrefix = tableLocation;
+    assertThat(sourcePrefix).startsWith("file:/");
+
+    String alternateSourcePrefix =
+        sourcePrefix.startsWith("file:///")
+            ? "file:/" + sourcePrefix.substring("file:///".length())
+            : "file:///" + sourcePrefix.substring("file:/".length());
+
+    assertThat(alternateSourcePrefix).isNotEqualTo(sourcePrefix);
+
+    String targetPrefix = targetTableDir.toUri().toString();
+
+    RewriteTablePath.Result result =
+        actions()
+            .rewriteTablePath(table)
+            .rewriteLocationPrefix(alternateSourcePrefix, targetPrefix)
+            .execute();
+
+    assertThat(result.fileListLocation()).isNotBlank();
+    assertThat(result.latestVersion()).isNotBlank();
+
+    List<String> filesToMove =
+        spark
+            .read()
+            .format("text")
+            .load(result.fileListLocation())
+            .as(Encoders.STRING())
+            .collectAsList();
+
+    assertThat(filesToMove).isNotEmpty();
+
+    for (String entry : filesToMove) {
+      String[] paths = entry.split(",", 2);
+      assertThat(paths).hasSize(2);
+      assertThat(paths[0]).isNotBlank();
+      assertThat(paths[1]).startsWith(targetPrefix);
+    }
+
+    assertThat(filesToMove).anyMatch(entry -> entry.contains(".metadata.json"));
+
+    List<Row> originalRows = spark.read().format("iceberg").load(tableLocation).collectAsList();
+
+    assertThat(originalRows).hasSize(2);
+
+    copyTableFiles(result);
+
+    assertManifestLengthsMatchOnDisk(TABLES.load(targetPrefix));
+
+    List<Row> relocatedRows = spark.read().format("iceberg").load(targetPrefix).collectAsList();
+
+    assertThat(relocatedRows).containsExactlyInAnyOrderElementsOf(originalRows);
   }
 
   @TestTemplate

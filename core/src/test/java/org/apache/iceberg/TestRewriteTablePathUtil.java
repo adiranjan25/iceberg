@@ -201,6 +201,23 @@ public class TestRewriteTablePathUtil extends TestBase {
   }
 
   @Test
+  public void testLocalFileUriAuthorityBoundaries() {
+    assertThatThrownBy(() -> RewriteTablePathUtil.relativize("file:////tmp/w/x", "file://tmp/w"))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("does not start with");
+
+    assertThatThrownBy(
+            () -> RewriteTablePathUtil.relativize("file://server/tmp/d.parquet", "file:///"))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("does not start with");
+
+    assertThat(RewriteTablePathUtil.relativize("file:/tmp/w/x", "file:///tmp/w")).isEqualTo("x");
+
+    assertThat(RewriteTablePathUtil.relativize("file://server/tmp/w/x", "file://server/tmp/w"))
+        .isEqualTo("x");
+  }
+
+  @Test
   public void testRelativizeInvalid() {
     // Path does not start with prefix
     assertThatThrownBy(() -> RewriteTablePathUtil.relativize("/other/path", "/source/table"))
@@ -772,6 +789,130 @@ public class TestRewriteTablePathUtil extends TestBase {
     Record record = records.get(0);
     assertThat(record.get(0)).asString().startsWith(targetPrefix).endsWith("data/file.parquet");
     assertThat(record.get(1)).isEqualTo(0L);
+  }
+
+  @Test
+  void rewritePositionDeleteRejectsDecreasingPaths() throws IOException {
+    checkRewrittenDeleteOrder("z.parquet", 0L, "a.parquet", 0L, false);
+  }
+
+  @Test
+  void rewritePositionDeleteRejectsDecreasingPositions() throws IOException {
+    checkRewrittenDeleteOrder("a.parquet", 5L, "a.parquet", 1L, false);
+  }
+
+  @Test
+  void rewritePositionDeleteAcceptsIncreasingPaths() throws IOException {
+    checkRewrittenDeleteOrder("a.parquet", 5L, "z.parquet", 0L, true);
+  }
+
+  @Test
+  void rewritePositionDeleteAcceptsIncreasingPositions() throws IOException {
+    checkRewrittenDeleteOrder("a.parquet", 1L, "a.parquet", 5L, true);
+  }
+
+  @Test
+  void rewritePositionDeleteAcceptsEqualPositions() throws IOException {
+    checkRewrittenDeleteOrder("a.parquet", 1L, "a.parquet", 1L, true);
+  }
+
+  private void checkRewrittenDeleteOrder(
+      String firstFile, long firstPos, String secondFile, long secondPos, boolean expectedSuccess)
+      throws IOException {
+
+    String sourcePrefix = "file://" + temp.toAbsolutePath();
+    String targetPrefix = "file:///relocated";
+
+    File sourceFile = temp.resolve("source-order-" + System.nanoTime() + ".avro").toFile();
+
+    OutputFile sourceOutput = Files.localOutput(sourceFile);
+
+    try (PositionDeleteWriter<Void> writer =
+        Avro.writeDeletes(sourceOutput)
+            .createWriterFunc(DataWriter::create)
+            .overwrite()
+            .withSpec(PartitionSpec.unpartitioned())
+            .buildPositionWriter()) {
+      writer.write(
+          PositionDelete.<Void>create().set(sourcePrefix + "/data/" + firstFile, firstPos));
+      writer.write(
+          PositionDelete.<Void>create()
+              .set("file:" + temp.toAbsolutePath() + "/data/" + secondFile, secondPos));
+    }
+
+    OutputFile targetOutput =
+        Files.localOutput(temp.resolve("target-order-" + System.nanoTime() + ".avro").toFile());
+
+    // Reader that projects only 2 fields (file_path + pos), simulating an impl that omits row data
+    RewriteTablePathUtil.PositionDeleteReaderWriter twoFieldReaderWriter =
+        new RewriteTablePathUtil.PositionDeleteReaderWriter() {
+          @Override
+          public CloseableIterable<Record> reader(
+              InputFile inputFile, FileFormat format, PartitionSpec spec) {
+            return Avro.read(inputFile)
+                .project(DeleteSchemaUtil.pathPosSchema())
+                .createResolvingReader(PlannedDataReader::create)
+                .build();
+          }
+
+          @Override
+          public PositionDeleteWriter<Record> writer(
+              OutputFile outputFile, FileFormat format, PartitionSpec spec, StructLike partition)
+              throws IOException {
+            return Avro.writeDeletes(outputFile)
+                .createWriterFunc(DataWriter::create)
+                .overwrite()
+                .withSpec(spec)
+                .buildPositionWriter();
+          }
+        };
+
+    DeleteFile deleteFile =
+        FileMetadata.deleteFileBuilder(PartitionSpec.unpartitioned())
+            .ofPositionDeletes()
+            .withFormat(FileFormat.AVRO)
+            .withPath(sourceFile.toURI().toString())
+            .withFileSizeInBytes(sourceFile.length())
+            .withRecordCount(2)
+            .build();
+
+    if (!expectedSuccess) {
+      assertThatThrownBy(
+              () ->
+                  RewriteTablePathUtil.rewritePositionDelete(
+                      deleteFile,
+                      targetOutput,
+                      table.io(),
+                      PartitionSpec.unpartitioned(),
+                      sourcePrefix,
+                      targetPrefix,
+                      twoFieldReaderWriter))
+          .isInstanceOf(IllegalArgumentException.class)
+          .hasMessageContaining("would violate sort order");
+      return;
+    }
+
+    RewriteTablePathUtil.rewritePositionDelete(
+        deleteFile,
+        targetOutput,
+        table.io(),
+        PartitionSpec.unpartitioned(),
+        sourcePrefix,
+        targetPrefix,
+        twoFieldReaderWriter);
+
+    List<Record> records = Lists.newArrayList();
+    try (CloseableIterable<Record> rewritten =
+        twoFieldReaderWriter.reader(
+            targetOutput.toInputFile(), FileFormat.AVRO, PartitionSpec.unpartitioned())) {
+      rewritten.forEach(records::add);
+    }
+
+    assertThat(records).hasSize(2);
+    assertThat(records.get(0).get(0).toString()).isEqualTo(targetPrefix + "/data/" + firstFile);
+    assertThat(records.get(0).get(1)).isEqualTo(firstPos);
+    assertThat(records.get(1).get(0).toString()).isEqualTo(targetPrefix + "/data/" + secondFile);
+    assertThat(records.get(1).get(1)).isEqualTo(secondPos);
   }
 
   /** Returns one position delete record that carries row data, as 1.11 and earlier could write. */
