@@ -466,6 +466,59 @@ class TestBinPackRewriteFilePlanner {
   }
 
   @Test
+  void testExplicitMinInputFilesStillPlansNoReductionGroup() {
+    BinPackRewriteFilePlanner planner = new BinPackRewriteFilePlanner(table);
+    planner.init(
+        ImmutableMap.of(
+            BinPackRewriteFilePlanner.MIN_INPUT_FILES, "2",
+            BinPackRewriteFilePlanner.MIN_FILE_SIZE_BYTES, "75",
+            BinPackRewriteFilePlanner.TARGET_FILE_SIZE_BYTES, "100",
+            BinPackRewriteFilePlanner.MAX_FILE_SIZE_BYTES, "180"));
+
+    List<FileScanTask> tasks =
+        ImmutableList.of(new MockFileScanTask(60L), new MockFileScanTask(60L));
+
+    assertThat(planner.expectedOutputFiles(120L)).isEqualTo(2);
+    assertThat(planner.planFileGroups(tasks))
+        .as("Explicit min-input-files still selects a group with no predicted file-count reduction")
+        .hasSize(1);
+  }
+
+  @Test
+  void testExactlyTargetSizeNotPlanned() {
+    BinPackRewriteFilePlanner planner = new BinPackRewriteFilePlanner(table);
+    planner.init(
+        ImmutableMap.of(
+            BinPackRewriteFilePlanner.MIN_FILE_SIZE_BYTES, "75",
+            BinPackRewriteFilePlanner.TARGET_FILE_SIZE_BYTES, "100",
+            BinPackRewriteFilePlanner.MAX_FILE_SIZE_BYTES, "180"));
+
+    List<FileScanTask> tasks =
+        ImmutableList.of(new MockFileScanTask(50L), new MockFileScanTask(50L));
+
+    assertThat(planner.expectedOutputFiles(100L)).isEqualTo(1);
+    assertThat(planner.planFileGroups(tasks)).isEmpty();
+  }
+
+  @Test
+  void testExactlyOnePointOneTargetBoundary() {
+    BinPackRewriteFilePlanner planner = new BinPackRewriteFilePlanner(table);
+    planner.init(
+        ImmutableMap.of(
+            BinPackRewriteFilePlanner.MIN_FILE_SIZE_BYTES, "75",
+            BinPackRewriteFilePlanner.TARGET_FILE_SIZE_BYTES, "100",
+            BinPackRewriteFilePlanner.MAX_FILE_SIZE_BYTES, "180"));
+
+    List<FileScanTask> tasks =
+        ImmutableList.of(new MockFileScanTask(55L), new MockFileScanTask(55L));
+
+    assertThat(planner.expectedOutputFiles(110L)).isEqualTo(1);
+    assertThat(planner.planFileGroups(tasks))
+        .as("Floating-point threshold permits one output at 110 bytes")
+        .hasSize(1);
+  }
+
+  @Test
   void testFileSizeAboveTarget() {
     BinPackRewriteFilePlanner planner = new BinPackRewriteFilePlanner(table);
     List<FileScanTask> tasks = ImmutableList.of(new MockFileScanTask(2000L));
