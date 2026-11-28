@@ -18,17 +18,24 @@
  */
 package org.apache.iceberg.io;
 
-import java.util.List;
 import java.util.Map;
-import org.apache.iceberg.relocated.com.google.common.collect.Lists;
+import org.apache.iceberg.relocated.com.google.common.collect.Iterables;
 
+/**
+ * Prototype FileIO wrapper for canonical-to-physical URI resolution.
+ *
+ * <p>Prefix listing preserves the requested namespace. This wrapper does not establish equivalence
+ * between canonical and physical paths for orphan-file detection. It must not be used for
+ * orphan-file cleanup until mixed-namespace comparison semantics are defined.
+ */
 public class CanonicalUriFileIO implements DelegateFileIO {
 
-  private final FileIO delegate;
+  private final DelegateFileIO delegate;
   private final String canonicalPrefix;
   private final String physicalPrefix;
 
-  public CanonicalUriFileIO(FileIO delegate, String canonicalPrefix, String physicalPrefix) {
+  public CanonicalUriFileIO(
+      DelegateFileIO delegate, String canonicalPrefix, String physicalPrefix) {
     if (canonicalPrefix == null || canonicalPrefix.isEmpty()) {
       throw new IllegalArgumentException("Canonical URI prefix must not be null or empty");
     }
@@ -41,17 +48,43 @@ public class CanonicalUriFileIO implements DelegateFileIO {
       throw new IllegalArgumentException("URI mapping prefixes must end with '/'");
     }
 
-    this.delegate = delegate;
+    String normalizedCanonical = normalizeForMatching(canonicalPrefix);
+    String normalizedPhysical = normalizeForMatching(physicalPrefix);
+
+    if (normalizedCanonical.startsWith(normalizedPhysical)
+        || normalizedPhysical.startsWith(normalizedCanonical)) {
+      throw new IllegalArgumentException("Canonical and physical URI prefixes must not overlap");
+    }
+
+    this.delegate = java.util.Objects.requireNonNull(delegate, "Delegate FileIO must not be null");
     this.canonicalPrefix = canonicalPrefix;
     this.physicalPrefix = physicalPrefix;
   }
 
-  private String resolve(String location) {
-    if (location.startsWith(canonicalPrefix)) {
-      return physicalPrefix + location.substring(canonicalPrefix.length());
+  private static String normalizeForMatching(String location) {
+    int schemeEnd = location.indexOf(':');
+
+    if (org.apache.iceberg.util.LocationUtil.hasScheme(location)
+        && location.startsWith(":///", schemeEnd)) {
+      return location.substring(0, schemeEnd + 1) + location.substring(schemeEnd + 3);
     }
 
     return location;
+  }
+
+  private static String translate(String location, String sourcePrefix, String targetPrefix) {
+    String normalizedLocation = normalizeForMatching(location);
+    String normalizedPrefix = normalizeForMatching(sourcePrefix);
+
+    if (normalizedLocation.startsWith(normalizedPrefix)) {
+      return targetPrefix + normalizedLocation.substring(normalizedPrefix.length());
+    }
+
+    return location;
+  }
+
+  private String resolve(String location) {
+    return translate(location, canonicalPrefix, physicalPrefix);
   }
 
   @Override
@@ -121,57 +154,39 @@ public class CanonicalUriFileIO implements DelegateFileIO {
   }
 
   private String canonicalize(String location) {
-    if (location.startsWith(physicalPrefix)) {
-      return canonicalPrefix + location.substring(physicalPrefix.length());
-    }
-
-    return location;
+    return translate(location, physicalPrefix, canonicalPrefix);
   }
 
   @Override
   public void deleteFiles(Iterable<String> pathsToDelete) throws BulkDeletionFailureException {
-    List<String> physicalPaths = Lists.newArrayList();
-
-    for (String path : pathsToDelete) {
-      physicalPaths.add(resolve(path));
-    }
-
-    if (delegate instanceof SupportsBulkOperations) {
-      ((SupportsBulkOperations) delegate).deleteFiles(physicalPaths);
-    } else {
-      for (String path : physicalPaths) {
-        delegate.deleteFile(path);
-      }
-    }
+    delegate.deleteFiles(Iterables.transform(pathsToDelete, this::resolve));
   }
 
   @Override
   public Iterable<FileInfo> listPrefix(String prefix) {
-    if (!(delegate instanceof SupportsPrefixOperations)) {
-      throw new UnsupportedOperationException("Delegate does not support prefix listing");
+    boolean canonicalRequest =
+        normalizeForMatching(prefix).startsWith(normalizeForMatching(canonicalPrefix));
+
+    Iterable<FileInfo> files = delegate.listPrefix(resolve(prefix));
+
+    if (!canonicalRequest) {
+      return files;
     }
 
-    List<FileInfo> results = Lists.newArrayList();
-
-    for (FileInfo file : ((SupportsPrefixOperations) delegate).listPrefix(resolve(prefix))) {
-      results.add(new FileInfo(canonicalize(file.location()), file.size(), file.createdAtMillis()));
-    }
-
-    return results;
+    return Iterables.transform(
+        files,
+        file -> new FileInfo(canonicalize(file.location()), file.size(), file.createdAtMillis()));
   }
 
   @Override
   public void deletePrefix(String prefix) {
-    if (!(delegate instanceof SupportsPrefixOperations)) {
-      throw new UnsupportedOperationException("Delegate does not support prefix deletion");
-    }
-
-    ((SupportsPrefixOperations) delegate).deletePrefix(resolve(prefix));
+    delegate.deletePrefix(resolve(prefix));
   }
 
   @Override
   public Map<String, String> properties() {
-    return delegate.properties();
+    throw new UnsupportedOperationException(
+        "Canonical URI configuration serialization is not supported");
   }
 
   @Override
