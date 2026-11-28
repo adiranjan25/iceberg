@@ -19,6 +19,7 @@
 package org.apache.iceberg.io;
 
 import java.util.Map;
+import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
 import org.apache.iceberg.relocated.com.google.common.collect.Iterables;
 
 /**
@@ -56,7 +57,7 @@ public class CanonicalUriFileIO implements DelegateFileIO {
       throw new IllegalArgumentException("Canonical and physical URI prefixes must not overlap");
     }
 
-    this.delegate = java.util.Objects.requireNonNull(delegate, "Delegate FileIO must not be null");
+    this.delegate = Preconditions.checkNotNull(delegate, "Delegate FileIO must not be null");
     this.canonicalPrefix = canonicalPrefix;
     this.physicalPrefix = physicalPrefix;
   }
